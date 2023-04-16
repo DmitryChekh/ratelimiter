@@ -15,25 +15,18 @@ type Tasker interface {
 type Rate struct {
 	max          int
 	maxPerMinute int
-
-	waitq []Tasker
-	
-	currentCnt    int
-	lastMinuteCnt int
-
-	done           chan struct{}
-	lastMinuteDone chan struct{}
+	currentCnt   int
+	done         chan struct{}
+	window       []time.Time
 }
 
 func New(maxTasks, maxTasksPerMinute int) *Rate {
 	return &Rate{
-		max:            maxTasks,
-		maxPerMinute:   maxTasksPerMinute,
-		done:           make(chan struct{}),
-		lastMinuteDone: make(chan struct{}),
-		currentCnt:     0,
-		lastMinuteCnt:  0,
-		waitq:          make([]Tasker, 0),
+		max:          maxTasks,
+		maxPerMinute: maxTasksPerMinute,
+		done:         make(chan struct{}),
+		currentCnt:   0,
+		window:       make([]time.Time, 0, maxTasksPerMinute),
 	}
 }
 
@@ -47,74 +40,79 @@ func (r *Rate) Run(ctx context.Context, tasks <-chan Tasker) {
 }
 
 func (r *Rate) execTask(ctx context.Context, tasks <-chan Tasker) error {
-	if len(r.waitq) > 0 {
-		if ok := r.tryRunFromQueue(); !ok {
-			select {
-			case <-ctx.Done():
-				err := ctx.Err()
-
-				return err
-			case <-r.done:
-				r.currentCnt--
-			case <-r.lastMinuteDone:
-				r.lastMinuteCnt--
-			}
-		}
-
-		return nil
-	}
-
 	select {
 	case <-ctx.Done():
 		err := ctx.Err()
 
 		return err
+	case <-r.done:
+		r.currentCnt--
 	case task, ok := <-tasks:
 		if !ok {
 			return errChannelClosed
 		}
 
-		if r.checkLimit() {
-			r.waitq = append(r.waitq, task)
+		d := r.calcWindow()
 
-			return nil
+		if d != time.Duration(0) {
+			select {
+			case <-ctx.Done():
+				return errChannelClosed
+			case <-time.After(d):
+			}
+		}
+
+		if r.checkLimit() {
+			<-r.done
 		}
 
 		r.do(task)
 
 		return nil
 	}
-}
-
-func (r *Rate) tryRunFromQueue() bool {
-	if r.checkLimit() {
-		return false
-	}
-
-	first := r.waitq[0]
-	r.waitq = r.waitq[1:]
-
-	r.do(first)
-
-	return true
+	return nil
 }
 
 func (r *Rate) do(t Tasker) {
 	r.currentCnt++
-	r.lastMinuteCnt++
+	r.updateWindow()
 
 	go func() {
 		t.Do()
-		r.execDone()
+		r.done <- struct{}{}
 	}()
 }
 
-func (r *Rate) execDone() {
-	r.done <- struct{}{}
-	time.Sleep(time.Minute)
-	r.lastMinuteDone <- struct{}{}
+func (r *Rate) checkLimit() bool {
+	return r.currentCnt == r.max
 }
 
-func (r *Rate) checkLimit() bool {
-	return r.currentCnt == r.max || r.lastMinuteCnt == r.maxPerMinute
+func (r *Rate) calcWindow() time.Duration {
+	if len(r.window) < r.maxPerMinute {
+		return time.Duration(0)
+	}
+
+	minuteAgo := time.Now().Truncate(time.Minute)
+
+	from := r.window[0]
+	to := r.window[len(r.window)-1]
+	sub := to.Sub(from)
+	if sub > time.Minute || from.Before(minuteAgo) {
+		return time.Duration(0)
+	}
+
+	delay := time.Minute.Truncate(sub)
+
+	return delay
+}
+
+func (r *Rate) updateWindow() {
+	now := time.Now()
+
+	if len(r.window) == r.maxPerMinute {
+		r.window = append(r.window, now)
+		r.window = r.window[1:]
+	} else {
+		r.window = append(r.window, now)
+	}
 }
