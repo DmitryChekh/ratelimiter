@@ -3,7 +3,6 @@ package ratelimiter
 import (
 	"context"
 	"errors"
-	"sync"
 	"time"
 )
 
@@ -18,8 +17,7 @@ type Rate struct {
 	maxPerMinute int
 
 	waitq []Tasker
-
-	mutex         sync.Mutex
+	
 	currentCnt    int
 	lastMinuteCnt int
 
@@ -31,7 +29,6 @@ func New(maxTasks, maxTasksPerMinute int) *Rate {
 	return &Rate{
 		max:            maxTasks,
 		maxPerMinute:   maxTasksPerMinute,
-		mutex:          sync.Mutex{},
 		done:           make(chan struct{}),
 		lastMinuteDone: make(chan struct{}),
 		currentCnt:     0,
