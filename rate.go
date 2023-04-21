@@ -6,7 +6,8 @@ import (
 	"time"
 )
 
-var errChannelClosed = errors.New("input channel closed")
+var ErrChannelClosed = errors.New("input channel closed")
+var ErrInvalidLimit = errors.New("bad limit size number. It can't be less then 1")
 
 type Tasker interface {
 	Do()
@@ -17,24 +18,29 @@ type Rate struct {
 	maxPerMinute int
 	currentCnt   int
 	done         chan struct{}
-	window       []time.Time
+	window       []time.Time // TODO: use ring buffer
 }
 
-func New(maxTasks, maxTasksPerMinute int) *Rate {
+func New(maxTasks, maxTasksPerMinute int) (*Rate, error) {
+	if maxTasks < 1 || maxTasksPerMinute < 1 {
+		return nil, ErrInvalidLimit
+	}
+
 	return &Rate{
 		max:          maxTasks,
 		maxPerMinute: maxTasksPerMinute,
 		done:         make(chan struct{}),
 		currentCnt:   0,
 		window:       make([]time.Time, 0, maxTasksPerMinute),
-	}
+	}, nil
 }
 
-func (r *Rate) Run(ctx context.Context, tasks <-chan Tasker) {
+func (r *Rate) Run(ctx context.Context, tasks <-chan Tasker) error {
 	for {
 		err := r.execTask(ctx, tasks)
+
 		if err != nil {
-			return
+			return err
 		}
 	}
 }
@@ -49,7 +55,7 @@ func (r *Rate) execTask(ctx context.Context, tasks <-chan Tasker) error {
 		r.currentCnt--
 	case task, ok := <-tasks:
 		if !ok {
-			return errChannelClosed
+			return ErrChannelClosed
 		}
 
 		d := r.calcWindow()
@@ -57,25 +63,34 @@ func (r *Rate) execTask(ctx context.Context, tasks <-chan Tasker) error {
 		if d != time.Duration(0) {
 			select {
 			case <-ctx.Done():
-				return errChannelClosed
+				err := ctx.Err()
+
+				return err
 			case <-time.After(d):
 			}
 		}
 
 		if r.checkLimit() {
-			<-r.done
+			select {
+			case <-ctx.Done():
+				err := ctx.Err()
+
+				return err
+			case <-r.done:
+				r.currentCnt--
+			}
 		}
 
 		r.do(task)
 
 		return nil
 	}
+
 	return nil
 }
 
 func (r *Rate) do(t Tasker) {
 	r.currentCnt++
-	r.updateWindow()
 
 	go func() {
 		t.Do()
@@ -92,18 +107,14 @@ func (r *Rate) calcWindow() time.Duration {
 		return time.Duration(0)
 	}
 
-	minuteAgo := time.Now().Truncate(time.Minute)
-
 	from := r.window[0]
-	to := r.window[len(r.window)-1]
-	sub := to.Sub(from)
-	if sub > time.Minute || from.Before(minuteAgo) {
+	sub := time.Now().Sub(from)
+
+	if sub >= time.Minute {
 		return time.Duration(0)
 	}
 
-	delay := time.Minute.Truncate(sub)
-
-	return delay
+	return time.Minute - sub
 }
 
 func (r *Rate) updateWindow() {

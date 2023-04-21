@@ -14,12 +14,16 @@ type Task struct {
 
 func (t Task) Do() {
 	fmt.Printf("Time: %v, Val:%v \n", time.Now().Format(time.TimeOnly), t.Val)
-	time.Sleep(time.Second * 2)
+	time.Sleep(time.Second * 15)
 }
 
 func TestRate_Run(t *testing.T) {
 	ctx := context.Background()
-	limiter := New(5, 7)
+	limiter, err := New(5, 7)
+
+	if err != nil {
+		t.Error(err)
+	}
 
 	tasks := make(chan Tasker)
 
@@ -33,7 +37,7 @@ func TestRate_Run(t *testing.T) {
 
 	var wg2 sync.WaitGroup
 
-	for i := 0; i < 15; i++ {
+	for i := 0; i < 28; i++ {
 		wg2.Add(1)
 		//time.Sleep(time.Second * 3)
 		go func(i int) {
